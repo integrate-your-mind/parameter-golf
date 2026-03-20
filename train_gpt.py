@@ -85,6 +85,8 @@ class Hyperparameters:
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
     grad_clip_norm = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+    adam_weight_decay = float(os.environ.get("ADAM_WEIGHT_DECAY", 0.0))
+    fp16_embed = bool(int(os.environ.get("FP16_EMBED", "0")))
 
     # Test-time training (LoRA) hyperparameters.
     ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 8))
@@ -97,12 +99,7 @@ class Hyperparameters:
     eval_stride = int(os.environ.get("EVAL_STRIDE", 0))  # 0 = disabled
     eval_batch_seqs = int(os.environ.get("EVAL_BATCH_SEQS", 32))
 
-# -----------------------------
-# MUON OPTIMIZER 
-# -----------------------------
-# 
-# As borrowed from modded-nanogpt
-# Background on Muon: https://kellerjordan.github.io/posts/muon/
+# MUON OPTIMIZER (from modded-nanogpt, https://kellerjordan.github.io/posts/muon/)
 
 def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -> Tensor:
     # Orthogonalize a 2D update matrix with a fast Newton-Schulz iteration.
@@ -461,7 +458,11 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
 
         # Small float tensors are cheap enough to keep directly. We still downcast
         # fp32/bf16 passthrough tensors to fp16 so metadata does not dominate size.
-        if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
+        # FP16_EMBED: keep embedding in fp16 — int8 errors compound through both
+        # input and output paths when embeddings are tied.
+        if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL or (
+            bool(int(os.environ.get("FP16_EMBED", "0"))) and "tok_emb" in name
+        ):
             kept = keep_float_tensor(name, t, passthrough_orig_dtypes)
             passthrough[name] = kept
             stats["int8_payload_bytes"] += tensor_nbytes(kept)
@@ -1199,11 +1200,14 @@ def main() -> None:
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
-    optimizer_tok = torch.optim.Adam(
+    adam_cls = torch.optim.AdamW if args.adam_weight_decay > 0 else torch.optim.Adam
+    adam_wd = {"weight_decay": args.adam_weight_decay} if args.adam_weight_decay > 0 else {}
+    optimizer_tok = adam_cls(
         [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}],
         betas=(args.beta1, args.beta2),
         eps=args.adam_eps,
         fused=True,
+        **adam_wd,
     )
     optimizer_muon = Muon(
         matrix_params,
@@ -1213,11 +1217,12 @@ def main() -> None:
     )
     for group in optimizer_muon.param_groups:
         group["base_lr"] = args.matrix_lr
-    optimizer_scalar = torch.optim.Adam(
+    optimizer_scalar = adam_cls(
         [{"params": scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr}],
         betas=(args.beta1, args.beta2),
         eps=args.adam_eps,
         fused=True,
+        **adam_wd,
     )
     optimizers: list[torch.optim.Optimizer] = [optimizer_tok, optimizer_muon, optimizer_scalar]
     if base_model.lm_head is not None:
