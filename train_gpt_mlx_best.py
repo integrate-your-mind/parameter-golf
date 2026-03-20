@@ -2,7 +2,7 @@
 """
 The `train_gpt.py` and `train_gpt_mlx.py` scripts are intended as good launching-off points for new participants, not SOTA configs. We'll accept PRs that tune, improve, or simplify these scripts without significantly increasing complexity, but competitive submissions should stay in the `/records` folder.
 
-Hard stop: To keep readable for newcomers, let's make sure `train_gpt.py` and `train_gpt_mlx.py` never are longer than 1500 lines.
+Hard stop: `train_gpt.py` and `train_gpt_mlx.py` must never be longer than 1500 lines.
 """
 from __future__ import annotations
 
@@ -27,9 +27,9 @@ import mlx.optimizers as optim
 from mlx.utils import tree_flatten, tree_unflatten
 
 # ==============================================================================
-# MEMORY LIMIT
+# MEMORY LIMIT — cap Metal memory so the laptop stays usable during training
 # ==============================================================================
-_MLX_MEM_LIMIT_GB = float(os.environ.get("MLX_MEM_LIMIT_GB", "12"))
+_MLX_MEM_LIMIT_GB = float(os.environ.get("MLX_MEM_LIMIT_GB", "16"))
 mx.set_memory_limit(int(_MLX_MEM_LIMIT_GB * 1024**3))
 
 # ==============================================================================
@@ -65,10 +65,6 @@ class Hyperparameters:
     # Chunk each logical MLX microbatch into smaller sub-batches to reduce peak
     # memory pressure without changing the effective optimizer batch.
     mlx_max_microbatch_tokens: int = int(os.environ.get("MLX_MAX_MICROBATCH_TOKENS", 8_192))
-    # Force MLX to materialize the graph after every sub-batch, preventing lazy
-    # graph buildup across accumulation steps. Keeps peak memory low on 16GB machines.
-    # Disable on 32GB+ unified memory for better throughput (MLX_EAGER_EVAL=0).
-    mlx_eager_eval: bool = bool(int(os.environ.get("MLX_EAGER_EVAL", "1")))
     warmup_steps: int = int(os.environ.get("WARMUP_STEPS", 20))
     warmdown_iters: int = int(os.environ.get("WARMDOWN_ITERS", 1200))
     max_wallclock_seconds: float = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
@@ -76,10 +72,12 @@ class Hyperparameters:
     # Model (defaults match the current baseline setup).
     vocab_size: int = int(os.environ.get("VOCAB_SIZE", 1024))
     num_layers: int = int(os.environ.get("NUM_LAYERS", 9))
+    block_repeats: int = int(os.environ.get("BLOCK_REPEATS", 1))
     model_dim: int = int(os.environ.get("MODEL_DIM", 512))
     num_heads: int = int(os.environ.get("NUM_HEADS", 8))
     num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 4))
     mlp_mult: int = int(os.environ.get("MLP_MULT", 2))
+    mlp_type: str = os.environ.get("MLP_TYPE", "relu2")  # "relu2" or "swiglu"
     tie_embeddings: bool = bool(int(os.environ.get("TIE_EMBEDDINGS", "1")))
     tied_embed_init_std: float = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
@@ -98,8 +96,8 @@ class Hyperparameters:
     muon_backend_steps: int = int(os.environ.get("MUON_BACKEND_STEPS", 5))
     muon_momentum_warmup_start: float = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
     muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
-    grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
-    adam_weight_decay: float = float(os.environ.get("ADAM_WEIGHT_DECAY", 0.0))
+    grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 1.0))
+    l1_weight_decay: float = float(os.environ.get("L1_WEIGHT_DECAY", 0.0))
 
     out_dir: str = os.environ.get("OUT_DIR", "logs")
 
@@ -358,6 +356,23 @@ class MLP(nn.Module):
         return self.proj(x * x)
 
 
+class SwiGLUMLP(nn.Module):
+    # SwiGLU: gate * silu(up), with 2/3 hidden dim to match param count of relu^2 MLP.
+    def __init__(self, dim: int, mlp_mult: int):
+        super().__init__()
+        # Match param count: relu2 has 2*dim*hidden params. SwiGLU has 3*dim*swi_hidden.
+        # swi_hidden = 2*hidden/3 = 2*dim*mlp_mult/3
+        swi_hidden = (2 * dim * mlp_mult) // 3
+        # Round to nearest multiple of 8 for alignment
+        swi_hidden = ((swi_hidden + 7) // 8) * 8
+        self.gate = CastedLinear(dim, swi_hidden)
+        self.up = CastedLinear(dim, swi_hidden)
+        self.proj = CastedLinear(swi_hidden, dim)
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return self.proj(nn.silu(self.gate(x)) * self.up(x))
+
+
 class Block(nn.Module):
     def __init__(
         self,
@@ -367,12 +382,13 @@ class Block(nn.Module):
         mlp_mult: int,
         rope_base: float,
         qk_gain_init: float,
+        mlp_type: str = "relu2",
     ):
         super().__init__()
         self.attn_norm = RMSNormNoWeight()
         self.mlp_norm = RMSNormNoWeight()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
-        self.mlp = MLP(dim, mlp_mult)
+        self.mlp = SwiGLUMLP(dim, mlp_mult) if mlp_type == "swiglu" else MLP(dim, mlp_mult)
         self.attn_scale = mx.ones((dim,), dtype=mx.float32)
         self.mlp_scale = mx.ones((dim,), dtype=mx.float32)
         self.resid_mix = mx.array(np.stack((np.ones((dim,), dtype=np.float32), np.zeros((dim,), dtype=np.float32))))
@@ -393,20 +409,24 @@ class GPT(nn.Module):
     # - tied embeddings for the LM head (the baseline default setup)
     def __init__(self, vocab_size: int, num_layers: int, dim: int, num_heads: int, num_kv_heads: int, mlp_mult: int,
                  logit_chunk_tokens: int, logit_softcap: float, rope_base: float, tied_embed_init_std: float,
-                 qk_gain_init: float):
+                 qk_gain_init: float, block_repeats: int = 1, mlp_type: str = "relu2"):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
         self.logit_chunk_tokens = logit_chunk_tokens
         self.logit_softcap = logit_softcap
+        self.block_repeats = block_repeats
 
+        # Effective depth = num_layers * block_repeats
+        effective_layers = num_layers * block_repeats
         self.tok_emb = nn.Embedding(vocab_size, dim)
-        self.num_encoder_layers = num_layers // 2
-        self.num_decoder_layers = num_layers - self.num_encoder_layers
+        self.num_encoder_layers = effective_layers // 2
+        self.num_decoder_layers = effective_layers - self.num_encoder_layers
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
         self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
+        # Only num_layers unique blocks, each reused block_repeats times
         self.blocks = [
-            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
+            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init, mlp_type=mlp_type)
             for i in range(num_layers)
         ]
         self.final_norm = RMSNormNoWeight()
@@ -427,16 +447,20 @@ class GPT(nn.Module):
         x0 = x
         skips: list[mx.array] = []
 
+        # Build effective block sequence: each unique block repeated block_repeats times
+        num_unique = len(self.blocks)
+        effective_blocks = []
+        for i in range(num_unique):
+            for _ in range(self.block_repeats):
+                effective_blocks.append(self.blocks[i])
+
         for i in range(self.num_encoder_layers):
-            x = self.blocks[i](x, x0)
+            x = effective_blocks[i](x, x0)
             skips.append(x)
         for i in range(self.num_decoder_layers):
-            # Odd layer counts have one more decoder block than encoder block. The baseline only
-            # applies a skip connection when one exists, then runs the remaining decoder block(s)
-            # without an added skip.
             if skips:
                 x = x + self.skip_weights[i].astype(x.dtype)[None, None, :] * skips.pop()
-            x = self.blocks[self.num_encoder_layers + i](x, x0)
+            x = effective_blocks[self.num_encoder_layers + i](x, x0)
         return self.final_norm(x)
 
     def loss(self, input_ids: mx.array, target_ids: mx.array) -> mx.array:
@@ -475,7 +499,7 @@ class Muon:
             momentum = (1.0 - t) * self.args.muon_momentum_warmup_start + t * self.args.muon_momentum
         else:
             momentum = self.args.muon_momentum
-        lr = self.args.matrix_lr * lr_mul
+        lr = self.args.matrix_lr * 0.9 * lr_mul
         out: dict[str, mx.array] = {}
         for k in self.keys:
             p = params[k]
@@ -510,16 +534,18 @@ class SplitOptimizers:
         ]
 
         self.muon = Muon(self.matrix_keys, params, args)
-        adam_cls = optim.AdamW if args.adam_weight_decay > 0 else optim.Adam
-        adam_kw = dict(
+        self.adam_embed = optim.Adam(
+            learning_rate=args.tied_embed_lr,
             betas=[args.beta1, args.beta2],
             eps=args.adam_eps,
             bias_correction=True,
         )
-        if args.adam_weight_decay > 0:
-            adam_kw["weight_decay"] = args.adam_weight_decay
-        self.adam_embed = adam_cls(learning_rate=args.tied_embed_lr, **adam_kw)
-        self.adam_scalar = adam_cls(learning_rate=args.scalar_lr, **adam_kw)
+        self.adam_scalar = optim.Adam(
+            learning_rate=args.scalar_lr,
+            betas=[args.beta1, args.beta2],
+            eps=args.adam_eps,
+            bias_correction=True,
+        )
 
     def step(self, model: GPT, grads_tree: dict, step: int, lr_mul: float) -> None:
         params = dict(tree_flatten(model.parameters()))
@@ -528,7 +554,7 @@ class SplitOptimizers:
 
         updated.update(self.muon.step(params, grads, step=step, lr_mul=lr_mul))
 
-        self.adam_embed.learning_rate = self.args.tied_embed_lr * lr_mul
+        self.adam_embed.learning_rate = self.args.tied_embed_lr * 0.9 * lr_mul
         updated.update(
             self.adam_embed.apply_gradients(
                 {self.embed_key: grads[self.embed_key]},
@@ -536,7 +562,7 @@ class SplitOptimizers:
             )
         )
 
-        self.adam_scalar.learning_rate = self.args.scalar_lr * lr_mul
+        self.adam_scalar.learning_rate = self.args.scalar_lr * 0.9 * lr_mul
         scalar_grads = {k: grads[k] for k in self.scalar_keys}
         scalar_params = {k: params[k] for k in self.scalar_keys}
         updated.update(self.adam_scalar.apply_gradients(scalar_grads, scalar_params))
@@ -758,8 +784,6 @@ def loss_and_grad_chunked(
         scale = float(y.size) / total_tokens
         loss_value = loss_value + loss.astype(mx.float32) * scale
         grad_accum = accumulate_flat_grads(grad_accum, grads, scale)
-        if args.mlx_eager_eval:
-            mx.eval(loss_value, grad_accum)  # materialize each chunk to cap peak memory
     return loss_value, tree_unflatten(list(grad_accum.items()))
 
 
@@ -770,7 +794,6 @@ def eval_val(
     base_bytes_lut: np.ndarray,
     has_leading_space_lut: np.ndarray,
     is_boundary_token_lut: np.ndarray,
-    log_fn: Callable[[str], None] | None = None,
 ) -> tuple[float, float]:
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
@@ -784,11 +807,10 @@ def eval_val(
         )
     val_batch_seqs = val_batch_tokens // args.train_seq_len
     total_seqs = (val_tokens.size - 1) // args.train_seq_len
-    total_batches = max((total_seqs + val_batch_seqs - 1) // val_batch_seqs, 1)
-    total_loss_sum = 0.0
+    total_loss = mx.array(0.0, dtype=mx.float32)
     total_tokens = 0.0
     total_bytes = 0.0
-    for batch_idx, batch_seq_start in enumerate(range(0, total_seqs, val_batch_seqs), start=1):
+    for batch_seq_start in range(0, total_seqs, val_batch_seqs):
         batch_seq_end = min(batch_seq_start + val_batch_seqs, total_seqs)
         raw_start = batch_seq_start * args.train_seq_len
         raw_end = batch_seq_end * args.train_seq_len + 1
@@ -798,9 +820,10 @@ def eval_val(
         x = mx.array(x_np, dtype=mx.int32)
         y = mx.array(y_np, dtype=mx.int32)
         chunk_token_count = float(y.size)
-        batch_loss = compiled_loss(x, y).astype(mx.float32)
-        mx.eval(batch_loss)
-        total_loss_sum += float(batch_loss.item()) * chunk_token_count
+        total_loss = total_loss + compiled_loss(x, y).astype(mx.float32) * chunk_token_count
+        # Periodically materialize to prevent lazy graph from eating all RAM
+        if (batch_seq_start // val_batch_seqs) % 64 == 63:
+            mx.eval(total_loss)
         prev_ids = x_np.reshape(-1)
         tgt_ids = y_np.reshape(-1)
         bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
@@ -809,11 +832,12 @@ def eval_val(
         ).astype(np.int16, copy=False)
         total_tokens += chunk_token_count
         total_bytes += float(bytes_np.astype(np.float64).sum())
-        if log_fn is not None and total_batches > 1 and (
-            batch_idx == 1 or batch_idx == total_batches or batch_idx % 25 == 0
-        ):
-            log_fn(f"val_progress:{batch_idx}/{total_batches}")
-    val_loss = total_loss_sum / total_tokens
+        # Materialize periodically to prevent the lazy computation graph from
+        # growing unbounded and exhausting memory on unified-memory Macs.
+        mx.eval(total_loss)
+    total_loss = total_loss / total_tokens
+    mx.eval(total_loss)
+    val_loss = float(total_loss.item())
     bits_per_token = val_loss / math.log(2.0)
     val_bpb = bits_per_token * (total_tokens / total_bytes)
     return val_loss, val_bpb
@@ -902,6 +926,8 @@ def main() -> None:
         rope_base=args.rope_base,
         tied_embed_init_std=args.tied_embed_init_std,
         qk_gain_init=args.qk_gain_init,
+        block_repeats=args.block_repeats,
+        mlp_type=args.mlp_type,
     )
     opt = SplitOptimizers(model, args)
 
@@ -1008,7 +1034,6 @@ def main() -> None:
     while True:
         last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
         if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
-            train_time_ms += 1000.0 * (time.perf_counter() - t0)
             # Validation always scans the same fixed full validation split.
             val_loss, val_bpb = eval_val(
                 args,
@@ -1017,8 +1042,8 @@ def main() -> None:
                 base_bytes_lut,
                 has_leading_space_lut,
                 is_boundary_token_lut,
-                log_fn=log,
             )
+            train_time_ms += 1000.0 * (time.perf_counter() - t0)
             if step % 25 == 0 or last_step:
                 log(
                     f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
@@ -1040,11 +1065,22 @@ def main() -> None:
             loss, grads = loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad)
             accum = accumulate_flat_grads(accum, grads, grad_scale)
             train_loss = train_loss + loss.astype(mx.float32) * grad_scale
-            if args.mlx_eager_eval:
-                mx.eval(train_loss, accum)  # materialize each microbatch to cap peak memory
 
         grads = tree_unflatten(list(accum.items()))
         grads = clip_grad_tree(grads, args.grad_clip_norm)
+        # Late-stage L1 weight decay: apply only in final 20% of training
+        # Ramps from 0 to l1_weight_decay to push weights toward zero for better zlib compression
+        if args.l1_weight_decay > 0 and max_wallclock_ms is not None:
+            progress = (train_time_ms + 1000.0 * (time.perf_counter() - t0)) / max_wallclock_ms
+            if progress >= 0.8:
+                ramp = (progress - 0.8) / 0.2
+                l1_lambda = args.l1_weight_decay * ramp
+                flat_grads = dict(tree_flatten(grads))
+                flat_params = dict(tree_flatten(model.parameters()))
+                for k in flat_grads:
+                    if k.startswith("blocks.") and flat_params[k].ndim == 2:
+                        flat_grads[k] = flat_grads[k] + l1_lambda * mx.sign(flat_params[k])
+                grads = tree_unflatten(list(flat_grads.items()))
         train_loss_value = float(train_loss.item())
         opt.step(model, grads, step=step, lr_mul=lr_mul)
         mx.synchronize()
@@ -1098,7 +1134,6 @@ def main() -> None:
         base_bytes_lut,
         has_leading_space_lut,
         is_boundary_token_lut,
-        log_fn=log,
     )
     q_eval_ms = 1000.0 * (time.perf_counter() - q_t0)
     log(f"final_int8_zlib_roundtrip val_loss:{q_val_loss:.4f} val_bpb:{q_val_bpb:.4f} eval_time:{q_eval_ms:.0f}ms")

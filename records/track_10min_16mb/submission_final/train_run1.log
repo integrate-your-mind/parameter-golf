@@ -1,0 +1,32 @@
+## Run 1: NCCL_IB_DISABLE=1 (slower, 71ms/step)
+step:0/20000 val_loss:6.9357 val_bpb:4.1077 train_time:0ms step_avg:0.01ms
+step:1/20000 train_loss:6.9370 train_time:104ms step_avg:103.58ms
+step:2/20000 train_loss:15.0732 train_time:130ms step_avg:65.10ms
+step:3/20000 train_loss:8.7774 train_time:178ms step_avg:59.23ms
+step:4/20000 train_loss:6.7978 train_time:226ms step_avg:56.42ms
+step:5/20000 train_loss:7.3086 train_time:273ms step_avg:54.65ms
+step:6/20000 train_loss:8.1120 train_time:321ms step_avg:53.42ms
+step:7/20000 train_loss:6.9629 train_time:368ms step_avg:52.62ms
+step:8/20000 train_loss:6.3856 train_time:417ms step_avg:52.15ms
+step:9/20000 train_loss:6.1195 train_time:466ms step_avg:51.73ms
+step:10/20000 train_loss:5.9139 train_time:513ms step_avg:51.30ms
+step:200/20000 train_loss:2.8103 train_time:9025ms step_avg:45.13ms
+step:400/20000 train_loss:2.3573 train_time:17983ms step_avg:44.96ms
+step:600/20000 train_loss:2.5464 train_time:26923ms step_avg:44.87ms
+step:800/20000 train_loss:2.2998 train_time:35864ms step_avg:44.83ms
+step:1000/20000 train_loss:2.3740 train_time:44823ms step_avg:44.82ms
+step:1000/20000 val_loss:2.3346 val_bpb:1.3827 train_time:44849ms step_avg:44.85ms
+step:1200/20000 train_loss:2.3863 train_time:53783ms step_avg:44.82ms
+step:1400/20000 train_loss:2.4348 train_time:62755ms step_avg:44.83ms
+step:1600/20000 train_loss:2.0972 train_time:71728ms step_avg:44.83ms
+step:1800/20000 train_loss:2.2036 train_time:80707ms step_avg:44.84ms
+step:8442/20000 val_loss:2.0821 val_bpb:1.2331 train_time:599943ms step_avg:71.07ms
+stopping_early: wallclock_cap train_time:599943ms step:8442/20000
+peak memory allocated: 10121 MiB reserved: 10370 MiB
+Serialized model: 67224983 bytes
+Code size: 58509 bytes
+Total submission size: 67283492 bytes
+Serialized model int8+zlib: 15775712 bytes (payload:17178912 raw_torch:17224025 payload_ratio:3.91x)
+Total submission size int8+zlib: 15834221 bytes
+final_int8_zlib_roundtrip val_loss:2.0942 val_bpb:1.2403 eval_time:1430ms
+final_int8_zlib_roundtrip_exact val_loss:2.09419872 val_bpb:1.24030244

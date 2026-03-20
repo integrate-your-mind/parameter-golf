@@ -1,0 +1,10 @@
+{
+  "author": "Roman Mondello",
+  "github_id": "romanmondello",
+  "run_id": "submission_v1",
+  "track": "10min_16mb",
+  "val_bpb": null,
+  "summary": "grad_clip=1.0, scalar_lr=0.08, depth recurrence, late-stage L1 compression",
+  "date": "2026-03-19",
+  "notes": "Pending H100 validation. Local (Apple Silicon) BPB: 1.6115 with 7-layer config."
+}

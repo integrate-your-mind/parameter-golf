@@ -1,0 +1,10 @@
+{
+  "author": "Roman Mondello",
+  "github_id": "romanmondello",
+  "run_id": "submission_v2",
+  "track": "10min_16mb",
+  "val_bpb": null,
+  "summary": "Combined: 10L + overtone init + phase resid_mix + FP16 embed + WD + grad_clip=1.0 + scalar_lr=0.08 + TTT + sliding window",
+  "date": "2026-03-20",
+  "notes": "Pending H100 validation. Stacks all top submission techniques with our proven hyperparameter improvements."
+}

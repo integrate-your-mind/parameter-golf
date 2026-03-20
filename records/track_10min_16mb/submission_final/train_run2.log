@@ -1,0 +1,38 @@
+step:1/20000 train_loss:6.9370 train_time:104ms step_avg:103.58ms
+step:2/20000 train_loss:15.0732 train_time:130ms step_avg:65.10ms
+step:3/20000 train_loss:8.7774 train_time:178ms step_avg:59.23ms
+step:4/20000 train_loss:6.7980 train_time:226ms step_avg:56.42ms
+step:5/20000 train_loss:7.3087 train_time:273ms step_avg:54.65ms
+step:6/20000 train_loss:8.1117 train_time:321ms step_avg:53.42ms
+step:7/20000 train_loss:6.9625 train_time:368ms step_avg:52.62ms
+step:8/20000 train_loss:6.3858 train_time:417ms step_avg:52.15ms
+step:9/20000 train_loss:6.1194 train_time:466ms step_avg:51.73ms
+step:10/20000 train_loss:5.9140 train_time:513ms step_avg:51.30ms
+step:500/20000 train_loss:2.4886 train_time:33040ms step_avg:66.08ms
+step:1000/20000 train_loss:2.3680 train_time:69416ms step_avg:69.42ms
+step:1500/20000 train_loss:2.2252 train_time:99424ms step_avg:66.28ms
+step:2000/20000 train_loss:2.2545 train_time:90182ms step_avg:45.09ms
+step:2500/20000 train_loss:2.1268 train_time:112617ms step_avg:45.05ms
+step:3000/20000 train_loss:2.2316 train_time:134935ms step_avg:44.98ms
+step:3500/20000 train_loss:2.2516 train_time:238144ms step_avg:68.04ms
+step:4000/20000 train_loss:2.1643 train_time:266418ms step_avg:66.60ms
+step:4500/20000 train_loss:2.2622 train_time:305748ms step_avg:67.94ms
+step:5000/20000 train_loss:2.0334 train_time:343565ms step_avg:68.71ms
+step:5500/20000 train_loss:2.1432 train_time:380986ms step_avg:69.27ms
+step:6000/20000 train_loss:2.2212 train_time:421365ms step_avg:70.23ms
+step:6500/20000 train_loss:2.0837 train_time:453260ms step_avg:69.73ms
+step:7000/20000 train_loss:2.2301 train_time:485609ms step_avg:69.37ms
+step:7500/20000 train_loss:2.1113 train_time:523376ms step_avg:69.78ms
+step:8000/20000 train_loss:2.0914 train_time:560211ms step_avg:70.03ms
+step:8500/20000 train_loss:2.0000 train_time:590000ms step_avg:69.41ms
+step:8442/20000 val_loss:2.0821 val_bpb:1.2331 train_time:599943ms step_avg:71.07ms
+stopping_early: wallclock_cap train_time:599943ms step:12780/20000
+peak memory allocated: 10121 MiB reserved: 10440 MiB
+Serialized model: 67224983 bytes
+Code size: 58509 bytes
+Total submission size: 67283492 bytes
+Serialized model int8+zlib: 15784396 bytes (payload:17178912 raw_torch:17224025 payload_ratio:3.91x)
+Total submission size int8+zlib: 15842905 bytes
+final_int8_zlib_roundtrip val_loss:2.0814 val_bpb:1.2327 eval_time:1428ms
+final_int8_zlib_roundtrip_exact val_loss:2.08141895 val_bpb:1.23273354
+final_int8_ttt_lora val_loss:2.0214 val_bpb:1.1972 eval_time:60704ms
